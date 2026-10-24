@@ -285,8 +285,7 @@ namespace PrayerWidget
         public string HeadName;
         public DateTime HeadTime;
         public string Prefix, CounterText, CounterUnit;   // "بقي" + "14" + "دقيقة" (الوحدة null مع h:mm:ss)
-        public DateTime NextTime;    // للتلميح في شريط المهام
-        public string NextName;
+        public DateTime NextTime;    // موعد أذان الصلاة القادمة
         public bool FastTick;        // الدقيقة الأولى بعد الأذان تُحدّث كل ثانية
         public float Progress;       // ٠..١: كم مضى من الوقت بين الأذان السابق والقادم
         public string StaticKey;     // يتغير فقط عندما تحتاج الطبقة الثابتة لإعادة رسم
@@ -434,6 +433,14 @@ namespace PrayerWidget
             float numW = Measure(g, n.CounterText, big, false);
             float unitW = n.CounterUnit == null ? 0 : Measure(g, n.CounterUnit, small, true);
             float total = prefW + gap + numW + (unitW > 0 ? gap + unitW : 0);
+            if (total > r.Width)
+            {
+                // رقم طويل مثل 7:25:10 لا يتسع: نصغّر خط الرقم بقدر ما يلزم (بخطوات صحيحة حتى تبقى الخطوط مخزّنة)
+                float room = r.Width - (total - numW);
+                big = Bd(Math.Max(22, (float)Math.Floor(44 * room / numW)));
+                numW = Measure(g, n.CounterText, big, false);
+                total = prefW + gap + numW + (unitW > 0 ? gap + unitW : 0);
+            }
             float x = align == 1 ? r.Right - total : r.X;
             const float drop = 8;   // الكلمات الصغيرة تنزل قليلًا لتجلس على سطر الرقم
             if (unitW > 0)
@@ -600,21 +607,6 @@ namespace PrayerWidget
             }
         }
 
-        static void Crescent(Graphics g, float x, float y, float d, Color c)
-        {
-            using (GraphicsPath moon = new GraphicsPath())
-            {
-                moon.AddEllipse(x, y, d, d);
-                using (Region rg = new Region(moon))
-                using (GraphicsPath cut = new GraphicsPath())
-                {
-                    cut.AddEllipse(x - d * 0.38f, y - d * 0.22f, d * 0.9f, d * 0.9f);   // القطع من اليسار: هلال يتجه لليمين
-                    rg.Exclude(cut);
-                    using (SolidBrush b = new SolidBrush(c)) g.FillRegion(b, rg);
-                }
-            }
-        }
-
         // align: 1 يمين، 0 وسط، -1 يسار
         static readonly Dictionary<int, StringFormat> formats = new Dictionary<int, StringFormat>();
 
@@ -653,18 +645,6 @@ namespace PrayerWidget
             gp.AddArc(x, y + h - d, d, d, 90, 90);
             gp.CloseFigure();
             return gp;
-        }
-
-        public static Icon MakeIcon()
-        {
-            using (Bitmap bmp = new Bitmap(32, 32, PixelFormat.Format32bppArgb))
-            using (Graphics g = Graphics.FromImage(bmp))
-            {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.Clear(Color.Transparent);
-                Crescent(g, 3, 3, 26, Color.FromArgb(255, 74, 222, 128));
-                return Icon.FromHandle(bmp.GetHicon());
-            }
         }
     }
 
@@ -1139,10 +1119,8 @@ namespace PrayerWidget
         readonly List<Widget> widgets = new List<Widget>();
         readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
         readonly Dictionary<DateTime, DateTime[]> cache = new Dictionary<DateTime, DateTime[]>();
-        readonly NotifyIcon tray = new NotifyIcon();
         readonly MenuOwner owner = new MenuOwner();
         Snap last;
-        string lastTip;
         DateTime nextIconCheck;
         int stamp;   // يزيد مع كل تغيير في الإعدادات
 
@@ -1197,11 +1175,6 @@ namespace PrayerWidget
             S = Settings.Load();
             Painter.H24 = S.H24;
 
-            try { tray.Icon = new Icon(Icon.ExtractAssociatedIcon(Application.ExecutablePath), SystemInformation.SmallIconSize); }
-            catch { tray.Icon = Painter.MakeIcon(); }
-            tray.Text = "مواقيت الصلاة";
-            tray.MouseUp += delegate(object o, MouseEventArgs e) { ShowMenu(); };
-            tray.Visible = true;
 
             timer.Tick += delegate { Tick(); };
             Rebuild();
@@ -1271,7 +1244,6 @@ namespace PrayerWidget
             if (next < 0) { nextDay = d.AddDays(1); next = 0; }
             DateTime[] nd = Times(nextDay);
             s.NextTime = nd[next];
-            s.NextName = NamesFor(nextDay)[next];
 
             // الصلاة السابقة (آخر أذان)
             int prev = -1;
@@ -1346,12 +1318,6 @@ namespace PrayerWidget
             DateTime now = DateTime.Now;
             last = MakeSnap(now);
             foreach (Widget w in widgets) w.Render(last);
-
-            long tipMin = (long)Math.Ceiling((last.NextTime - now).TotalMinutes);
-            string tip = last.NextName + " بعد " + (tipMin < 60
-                ? tipMin.ToString(CultureInfo.InvariantCulture) + " " + MinWord(tipMin)
-                : Dur(tipMin * 60, false));
-            if (tip != lastTip) { tray.Text = tip; lastTip = tip; }
 
             if (now >= nextIconCheck) { ClearIcons(); nextIconCheck = now.AddSeconds(10); }
 
@@ -1566,8 +1532,6 @@ namespace PrayerWidget
         void Quit()
         {
             timer.Stop();
-            tray.Visible = false;
-            tray.Dispose();
             foreach (Widget w in widgets) w.Destroy();
             widgets.Clear();
             owner.DestroyHandle();
