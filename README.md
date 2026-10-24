@@ -47,8 +47,12 @@
 
 الكود كله في ملف واحد: [`PrayerWidget.cs`](PrayerWidget.cs) (WinForms + GDI+ مع نافذة طبقية `UpdateLayeredWindow`). الإعدادات تنحفظ في `%APPDATA%\PrayerWidget\settings.ini`.
 
+## الترخيص
+
+مفتوح المصدر بترخيص [MIT](LICENSE): استخدمه وعدّل عليه ووزّعه بحرية، بشرط تبقي إشعار الترخيص. (خط ثمانية له ترخيصه الخاص وغير مشمول.)
+
 </div>
 
 ---
 
-**Prayer Times widget for Windows** — a tiny Liquid-Glass-style desktop widget showing the next prayer and a live countdown (Umm al-Qura, computed offline). Single ~70 KB exe, no GPU use, near-zero CPU. Download it from [Releases](../../releases/latest), or build it with `build.bat` (uses the C# compiler that ships with Windows).
+**Prayer Times widget for Windows** — a tiny Liquid-Glass-style desktop widget showing the next prayer and a live countdown (Umm al-Qura, computed offline). Single ~70 KB exe, no GPU use, near-zero CPU. Download it from [Releases](../../releases/latest), or build it with `build.bat` (uses the C# compiler that ships with Windows). Open source under the [MIT License](LICENSE).
