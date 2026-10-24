@@ -1,27 +1,119 @@
 ﻿// أداة مواقيت الصلاة — Prayer Widget
 // نافذة واحدة خفيفة لكل شاشة، تُرسم بـ GDI+ في ذاكرة DIB وتُعرض بـ UpdateLayeredWindow.
-// لا إنترنت، لا WPF، لا رسوم متحركة: تحديث واحد في الثانية (أو في الدقيقة إذا أُخفيت الثواني).
+// لا WPF، لا رسوم متحركة: تحديث واحد في الثانية (أو في الدقيقة إذا أُخفيت الثواني).
+// الإنترنت يُستخدم فقط للتحقق من وجود إصدار جديد على GitHub مرة واحدة في اليوم.
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Globalization;
 using System.IO;
+using System.Net;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("مواقيت الصلاة")]
 [assembly: System.Reflection.AssemblyProduct("Prayer Widget")]
-[assembly: System.Reflection.AssemblyVersion("1.0.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.0.0")]
 
 namespace PrayerWidget
 {
+    // ───────────────────────────── التحديث التلقائي ─────────────────────────────
+    // يسأل GitHub عن آخر إصدار؛ إذا كان أحدث يحمّل الملف، يتحقق من بصمته SHA-256 كما نشرها GitHub،
+    // ثم يبدّل الملف (ويندوز يسمح بإعادة تسمية برنامج شغّال) ويشغّل النسخة الجديدة.
+    static class Updater
+    {
+        public const string Version = "1.2.0";
+        const string Api = "https://api.github.com/repos/not-sal/prayer-widget/releases/latest";
+
+        public class Info { public Version Ver; public string Tag, Url, Sha256; }
+
+        static HttpWebRequest Request(string url, int timeout)
+        {
+            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+            HttpWebRequest rq = (HttpWebRequest)WebRequest.Create(url);
+            rq.UserAgent = "PrayerWidget/" + Version;
+            rq.Timeout = timeout;
+            return rq;
+        }
+
+        static Version Norm(string v)
+        {
+            Version x = new Version(v);
+            return new Version(x.Major, x.Minor, Math.Max(0, x.Build));
+        }
+
+        // يعمل خارج خيط الواجهة. يعيد null إذا لا يوجد إصدار أحدث؛ ويرمي استثناء إذا فشل الاتصال
+        public static Info Check()
+        {
+            HttpWebRequest rq = Request(Api, 15000);
+            rq.Accept = "application/vnd.github+json";
+            string json;
+            using (WebResponse rs = rq.GetResponse())
+            using (StreamReader sr = new StreamReader(rs.GetResponseStream(), Encoding.UTF8))
+                json = sr.ReadToEnd();
+
+            Match tag = Regex.Match(json, "\"tag_name\"\\s*:\\s*\"v?([0-9]+(?:\\.[0-9]+){1,2})\"");
+            Match url = Regex.Match(json, "\"browser_download_url\"\\s*:\\s*\"(https://github\\.com/not-sal/prayer-widget/releases/download/[^\"]+/PrayerWidget\\.exe)\"");
+            if (!tag.Success || !url.Success) return null;
+            Info i = new Info();
+            i.Ver = Norm(tag.Groups[1].Value);
+            if (i.Ver <= Norm(Version)) return null;
+            i.Tag = tag.Groups[1].Value;
+            i.Url = url.Groups[1].Value;
+            Match dg = Regex.Match(json, "\"name\"\\s*:\\s*\"PrayerWidget\\.exe\"[\\s\\S]*?\"digest\"\\s*:\\s*\"sha256:([0-9a-f]{64})\"");
+            if (dg.Success) i.Sha256 = dg.Groups[1].Value;
+            return i;
+        }
+
+        // يعمل خارج خيط الواجهة: يحمّل، يتحقق، ويبدّل الملف. يرمي استثناء عند أي فشل ويترك القديم كما هو
+        public static void Apply(Info info)
+        {
+            string exe = Application.ExecutablePath, tmp = exe + ".new", old = exe + ".old";
+            using (WebResponse rs = Request(info.Url, 60000).GetResponse())
+            using (Stream src = rs.GetResponseStream())
+            using (FileStream fs = File.Create(tmp))
+                src.CopyTo(fs);
+
+            byte[] data = File.ReadAllBytes(tmp);
+            if (data.Length < 1024 || data[0] != 'M' || data[1] != 'Z') { File.Delete(tmp); throw new Exception("الملف المحمّل غير صالح"); }
+            if (info.Sha256 != null)
+            {
+                string got;
+                using (SHA256 sha = SHA256.Create()) got = BitConverter.ToString(sha.ComputeHash(data)).Replace("-", "").ToLowerInvariant();
+                if (got != info.Sha256) { File.Delete(tmp); throw new Exception("بصمة الملف لا تطابق الإصدار المنشور"); }
+            }
+
+            if (File.Exists(old)) File.Delete(old);
+            File.Move(exe, old);
+            try { File.Move(tmp, exe); }
+            catch { File.Move(old, exe); throw; }
+        }
+
+        // بعد التحديث: حذف النسخة القديمة المتبقية
+        public static void Cleanup()
+        {
+            string exe = Application.ExecutablePath;
+            try { if (File.Exists(exe + ".old")) File.Delete(exe + ".old"); } catch { }
+            try { if (File.Exists(exe + ".new")) File.Delete(exe + ".new"); } catch { }
+        }
+
+        public static void Restart()
+        {
+            Process.Start(Application.ExecutablePath, "--updated");
+        }
+    }
+
     // ───────────────────────────── الحساب الفلكي ─────────────────────────────
     // تقويم أم القرى: الفجر ١٨٫٥°، العشاء بعد المغرب بـ ٩٠ دقيقة (١٢٠ في رمضان)،
     // والعصر على قول الجمهور (ظل الشيء مثله) كما هو معتمد في السعودية.
@@ -189,6 +281,7 @@ namespace PrayerWidget
         public string Theme = "auto";             // auto (حسب ويندوز) | dark | light
         public bool Seconds = true, H24 = false, Locked = false;
         public bool OverIcons = false;            // true: فوق الاختصارات وتغطيها، false: تحجز مكانها وتبعد الاختصارات
+        public DateTime LastUpdateCheck = DateTime.MinValue;
 
         public static bool SystemDark = ReadSystemDark();
         public bool Dark { get { return Theme == "auto" ? SystemDark : Theme == "dark"; } }
@@ -230,6 +323,7 @@ namespace PrayerWidget
                         case "screens": s.Screens = v; break;
                         case "theme": s.Theme = v; break;
                         case "overicons": s.OverIcons = v == "1"; break;
+                        case "lastupdatecheck": s.LastUpdateCheck = new DateTime(long.Parse(v, Inv)); break;
                         case "seconds": s.Seconds = v == "1"; break;
                         case "h24": s.H24 = v == "1"; break;
                         case "locked": s.Locked = v == "1"; break;
@@ -262,6 +356,7 @@ namespace PrayerWidget
                 b.AppendLine("screens=" + Screens);
                 b.AppendLine("theme=" + Theme);
                 b.AppendLine("overicons=" + (OverIcons ? "1" : "0"));
+                b.AppendLine("lastupdatecheck=" + LastUpdateCheck.Ticks.ToString(Inv));
                 b.AppendLine("seconds=" + (Seconds ? "1" : "0"));
                 b.AppendLine("h24=" + (H24 ? "1" : "0"));
                 b.AppendLine("locked=" + (Locked ? "1" : "0"));
@@ -1122,6 +1217,9 @@ namespace PrayerWidget
         readonly MenuOwner owner = new MenuOwner();
         Snap last;
         DateTime nextIconCheck;
+        SynchronizationContext ui;     // لإرجاع نتائج الشبكة إلى خيط الواجهة
+        Updater.Info update;           // إصدار أحدث متوفر (null = لا يوجد)
+        bool updating;
         int stamp;   // يزيد مع كل تغيير في الإعدادات
 
         static readonly string[] BaseNames = { "الفجر", "الشروق", "الظهر", "العصر", "المغرب", "العشاء" };
@@ -1203,6 +1301,14 @@ namespace PrayerWidget
             SystemEvents.TimeChanged += delegate { cache.Clear(); Tick(); };
             SystemEvents.PowerModeChanged += delegate(object o, PowerModeChangedEventArgs e)
             { if (e.Mode == PowerModes.Resume) { cache.Clear(); Tick(); } };
+
+            // التحقق من التحديثات: بعد دقيقة من التشغيل، ثم كل ساعة يُنظر هل مرّ يوم على آخر تحقق
+            ui = new WindowsFormsSynchronizationContext();
+            Updater.Cleanup();
+            System.Windows.Forms.Timer updTimer = new System.Windows.Forms.Timer();
+            updTimer.Interval = 60 * 1000;
+            updTimer.Tick += delegate { updTimer.Interval = 60 * 60 * 1000; CheckForUpdate(false); };
+            updTimer.Start();
 
             // تقليص الذاكرة بعد الإقلاع
             System.Windows.Forms.Timer trim = new System.Windows.Forms.Timer();
@@ -1416,6 +1522,11 @@ namespace PrayerWidget
         {
             Point pt = Cursor.Position;
             PopMenu m = new PopMenu();
+            if (update != null && !updating)
+            {
+                m.Item("⬇  تحديث متوفر — ثبّت الإصدار " + update.Tag, false, StartUpdate);
+                m.Sep();
+            }
 
             PopMenu lay = m.Sub("الشكل");
             lay.Item("مربع — الصلاة القادمة فقط", S.Layout == "square", delegate { Set(delegate { S.Layout = "square"; }); });
@@ -1471,11 +1582,64 @@ namespace PrayerWidget
             m.Item("إرجاع المكان الافتراضي", false, delegate { Set(delegate { S.Pos.Clear(); }); });
             m.Sep();
             m.Item("التشغيل مع بدء ويندوز", IsStartup(), ToggleStartup);
+            m.Item("تحقق من التحديث (الإصدار " + Updater.Version + ")", false, delegate { CheckForUpdate(true); });
             m.Item("خروج", false, Quit);
 
             Action a = m.Show(owner.Handle, pt);
             if (a != null) a();
             Native.TrimMemory();
+        }
+
+        // ── التحديث ──
+        // manual=false: مرة في اليوم بصمت. manual=true: من القائمة، ويُظهر النتيجة للمستخدم
+        void CheckForUpdate(bool manual)
+        {
+            if (updating) return;
+            if (!manual && (DateTime.Now - S.LastUpdateCheck).TotalHours < 24) return;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                Updater.Info info = null;
+                Exception err = null;
+                try { info = Updater.Check(); } catch (Exception e) { err = e; }
+                ui.Post(delegate
+                {
+                    if (err == null) { S.LastUpdateCheck = DateTime.Now; S.Save(); update = info; }
+                    if (!manual) return;
+                    if (err != null) Say("تعذّر الاتصال بـ GitHub للتحقق من التحديث.\n" + err.Message, MessageBoxIcon.Warning);
+                    else if (info == null) Say("عندك آخر إصدار (" + Updater.Version + ").", MessageBoxIcon.Information);
+                    else if (Ask("فيه إصدار جديد: " + info.Tag + "\nعندك الحين: " + Updater.Version + "\n\nتبي تحدّث الحين؟")) StartUpdate();
+                }, null);
+            });
+        }
+
+        void StartUpdate()
+        {
+            if (update == null || updating) return;
+            updating = true;
+            Updater.Info info = update;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                Exception err = null;
+                try { Updater.Apply(info); } catch (Exception e) { err = e; }
+                ui.Post(delegate
+                {
+                    if (err != null) { updating = false; Say("تعذّر التحديث:\n" + err.Message, MessageBoxIcon.Warning); return; }
+                    Updater.Restart();   // النسخة الجديدة تنتظر حتى يُغلق هذا البرنامج ثم تبدأ
+                    Quit();
+                }, null);
+            });
+        }
+
+        static MessageBoxOptions Rtl { get { return MessageBoxOptions.RtlReading | MessageBoxOptions.RightAlign; } }
+
+        static void Say(string text, MessageBoxIcon icon)
+        {
+            MessageBox.Show(text, "مواقيت الصلاة", MessageBoxButtons.OK, icon, MessageBoxDefaultButton.Button1, Rtl);
+        }
+
+        static bool Ask(string text)
+        {
+            return MessageBox.Show(text, "مواقيت الصلاة", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1, Rtl) == DialogResult.Yes;
         }
 
         static bool HasScreen(string dev)
@@ -1608,15 +1772,30 @@ namespace PrayerWidget
                 App.Preview(args[1], at);
                 return;
             }
+            // --update : تحديث صامت من سطر الأوامر (يحمّل الإصدار الأحدث إن وُجد ويشغّله)
+            if (args.Length >= 1 && args[0] == "--update")
+            {
+                Updater.Info info = Updater.Check();
+                if (info != null) { Updater.Apply(info); Updater.Restart(); }
+                return;
+            }
+
             bool created;
             using (Mutex mutex = new Mutex(true, "PrayerWidget_SingleInstance", out created))
             {
-                if (!created) return;
+                if (!created)
+                {
+                    // بعد التحديث: ننتظر النسخة القديمة حتى تُغلق، وإلا فنسخة أخرى تعمل أصلًا
+                    if (Array.IndexOf(args, "--updated") < 0) return;
+                    try { if (!mutex.WaitOne(15000)) return; }
+                    catch (AbandonedMutexException) { }
+                }
                 try { Native.SetProcessDpiAwarenessContext(new IntPtr(-4)); }   // Per-Monitor V2
                 catch { try { Native.SetProcessDPIAware(); } catch { } }
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 Application.Run(new App());
+                mutex.ReleaseMutex();
             }
         }
     }
