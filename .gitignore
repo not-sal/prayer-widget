@@ -1,0 +1,6 @@
+# build output (published as a GitHub release instead)
+*.exe
+*.pdb
+
+# local design previews (curated screenshots live in docs/)
+preview/
